@@ -1,0 +1,413 @@
+---
+title: "Technical_Injury_Analysis_2022"
+author: "Oscar Mendoza"
+output:
+  html_document:
+    df_print: paged
+  pdf_document: default
+  word_document: default
+---
+
+## 1. Introduction
+
+The motivation of this analysis arises due to a recent accident in one of the factories of the company. This unfortunate event has triggered some questions about company's workplace safety practices. The CEO has request to analysis two pivotal questions to take some actions in order to mitigate accident in the factories. The questions are:
+
+  a. Of the various safety regimes in place across your company, which one would be recommended become the international standard     for the company, based solely on injury prevention performance?
+
+  b. It has been suggested by senior management that industry experience is more important than the safety regime when it comes to    preventing injuries. The idea is that a policy should be directed instead at lowering employee turnover which would in turn reduce
+  injury rates. Does available data support this assertion?
+
+In order to answer these two questions, it will be performed a statistical analysis using a database with information of number of injuries, safety work group, hour worked by group and experience by group obtained from the last 12 months.
+
+
+## 2. Data
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(warning = TRUE, echo = TRUE, message = FALSE)
+
+library(GGally)
+library(knitr)
+library(MASS)
+library(ggpubr)
+library(tidyverse)
+library(lmtest) #likelihood ratio test
+library(ggplot2)
+library(AICcmodavg)
+library(DHARMa) #simulate residuals
+library(AER)
+library(reshape)
+library(broom)
+library(jtools)
+```
+
+### 2.1. Upload the data
+```{r read in data, include=FALSE}
+data <- read.csv("injury.csv",header = TRUE)
+```
+
+The data has 4 variables:
+
+  1. Injuries - count of injuries in group
+  2. Safety - the safety regime in place for group (1,2,3,4)
+  3. Hours - total hours worked by this group
+  4. Experience - the experience level of group (1,2,3,4)
+
+According to the questions, the main focus is to determine the main effect between the variables injuries, safety and experience.
+
+
+## 3. Data exploratory
+Using basic statistics and plots will be useful to identify some problems with the data and some relationships between variables.
+
+### 3.1. Data cleaning
+```{r data type, include=TRUE}
+# Check level factors
+unique(data$Safety)
+unique(data$Experience)
+```
+The previous code shows that variables safety and experience have the format of integer, which it is not useful because they are levels from 1 to 4. Therefore, in order to follow the levels, they may be changed into factor from 1 to 4.
+
+```{r data clean}
+# Clean the data: change from integer to factor
+data$Safety <- factor(data$Safety,levels = 1:4)
+data$Experience <- factor(data$Experience,levels = 1:4)
+
+# Check new level factors
+str(data)
+unique(data$Safety)
+unique(data$Experience)
+```
+
+### 3.2. Statistical summary
+```{r basic summary, include=TRUE}
+# General Summary
+summary(data)
+
+# Summary by variable safety
+safety_group <- group_by(data, Safety)
+safety_stat <- summarise_at(safety_group, vars(Injuries), list(Mean = mean, var = var, sd = sd));safety_stat
+
+# Summary by variable experience
+experience_group <- group_by(data, Experience)
+experience_stat <- summarise_at(experience_group, vars(Injuries), list(Mean = mean, var = var, sd = sd));experience_stat
+
+```
+This information displays the descriptive statistic of the variables injuries vs safety and injuries vs experience:
+
+  - The highest mean of injuries in variable safety is in group 3 and the lowest in group 1.
+  - The highest mean of injuries in variable experience is in group 3 and the lowest in group 4.
+  - Looking this information does not reveal some trends or relations, just the mean increase and also the variance. 
+
+Also, the variable hours are affecting this calculation since employees are exposed to worked-hours, causing the number of injuries to be not calculated in the same time span. Therefore, it would be proper to determine the ratio of injuries between worked-hours (injuries/worked-hours). This will be illustrated in plots to improve the analysis.
+
+
+### 3.3. Exploratory analysis plot
+```{r plots,  echo= TRUE, include=TRUE, fig.width=8, fig.height=8}
+# Exploratory plots:
+
+A <- ggplot(data, aes(x = Injuries)) + geom_histogram(binwidth = 45, color = "grey20", fill = "lightskyblue") +
+  xlab("Number of Injuries") + ylab("Frequency") +  theme_bw()
+
+B <- ggplot(data, aes(y = Injuries, x = log(Hours))) + geom_point() + geom_smooth(method = 'lm') +
+  labs(y = "Number of Injuries", x = "log(Hours)")+ theme_bw()
+
+C <- ggplot(data) + geom_boxplot(aes(y = log((Injuries+1)/Hours), x = Safety)) + 
+  labs(y = "log(Injuries/Hours)", x = "Safety") + theme_bw()
+
+D <- ggplot(data) + geom_boxplot(aes(y = log((Injuries+1)/Hours), x = Experience)) + 
+  labs(y = "log(Injuries/Hours)", x = "Experience")+theme_bw()
+
+E <- ggplot(data) + geom_boxplot(aes(y = log((Injuries+1)/Hours), x = Safety, group = interaction(Experience,Safety), 
+  fill = Experience)) + labs(y = "log(Injuries/Hours)", x = "Safety", fill = "Experience") + theme_bw()
+
+F <- ggplot(data, aes(x=Experience,y=log((Injuries+1)/Hours),fill=Safety))+ geom_boxplot() + theme_bw()
+
+ggarrange(A,B,C,D,E,F, ncol = 2,nrow = 4,labels  = c("A","B","C","D","E","F"))
+```
+
+Plot description:
+
+- To avoid log(0), it is plotted (injuries +1) because log(x) with x is > 0
+- The plot A shows a Poisson distribution (right skewed) of number of injuries with the majority of number between 1 and 100. 
+- The plot B illustrates a relationship between number of injuries and worked-hour (log).
+- The plot C shows high variability in safety 2, but it is difficult to do some conclusions or assumptions about some relationship. 
+- The plot D shows a descendant number of injuries when the experience increase, for example the observations with experience = 4 have the lowest numbers of injury, also its variability is symmetric.
+- The plot E illustrate the same previous trend of increasing the year of experience and decreasing the number of injuries. However, it does not reveal if the safety variable affects the response variable.
+
+
+## 4. Model development
+Using the information from descriptive analysis, it can be considered:
+
+  - Response variable: Number of injuries.
+  - Covariates: safety and experience.
+  - The variable worked-hours will be used as offset because it is needed to scale the number of injuries in a same rate.
+  - Models will be developed using Poisson GLM (regression).
+  - Business questions:
+    1. which is the best safety regime work?
+    2. is industry experience more important than the safety regime?
+
+### 4.1. Poisson regression (PR)
+
+First, it is generated the all possible models to then compare them and to determine the best model with the proper covariate.
+```{r Poisson model, include=TRUE}
+#Fit GLM with poisson distribution and log link function.
+p1.fit <- glm(data = data, formula = Injuries ~ offset(log(Hours)) + Safety + Experience + Safety*Experience, family = "poisson")
+p2.fit <- glm(data = data, formula = Injuries ~ offset(log(Hours)) + Safety + Experience, family = poisson(link = "log"))
+p3.fit <- glm(data = data, formula = Injuries ~ offset(log(Hours)) + Safety, family = poisson(link = "log"))
+p4.fit <- glm(data = data, formula = Injuries ~ offset(log(Hours)) + Experience, family = poisson(link = "log"))
+```
+
+
+#### 4.1.1 Model selection
+Using AIC and BIC to determine the lowest value, and as consequence, the best model.
+```{r selection PR, include=TRUE}
+#Assess the fit of the models: log-likelihood, AIC, BIC for four models: MP1, MP2, MP3, and MP4.
+model.list <- list("MP1" = p1.fit, "MP2" = p2.fit, "MP3" = p3.fit, "MP4" = p4.fit)
+logLiks <- sapply(model.list,FUN = logLik)
+aics <- sapply(model.list,FUN = AIC)
+bics <- sapply(model.list,FUN = BIC)
+
+#Aggregate measures of fit into a single data-frame for plotting
+plot_data1 <- data.frame(model = c("MP1","MP2","MP3","MP4"), aic = aics, bic = bics, logL = logLiks)
+
+#Display table with measures:
+knitr::kable(plot_data1,row.names = FALSE, col.names = c("Model","AIC","BIC","log-Likelihood"))
+```
+Models MP3 and MP4 are the only models not nested. Therefore, they can be compared using AIC and BIC. 
+- It is selected MP4 because it obtained the lowest AIC and BIC value.
+- MP4 is nested from the model MP2, so Anova is used to compare this nested model.
+
+Hypothesis:
+
+- H0: Additional parameter safety is not needed to explain variation
+- H1: Additional parameter safety is needed to explain variation
+
+```{r anova PR1,include=TRUE}
+anova(p4.fit,p2.fit,test="Chisq")
+```
+The p-value is very significant, so the null hypothesis is rejected, in favor of the alternative hypothesis that the additional covariate safety is needed to explain variation.
+
+MP2 is selected according to the Anova test.
+MP2 is nested of the model MP1, so Anova is again used to compare them.
+
+Hypothesis:
+
+- H0: Additional parameter iteration between safety and experience (safety*experience) is not needed to explain variation
+- H1: Additional parameter iteration between safety and experience (safety*experience) is needed to explain variation
+
+```{r anova PR2,include=TRUE}
+anova(p2.fit,p1.fit,test="Chisq")
+```
+The p-value is very significant, so the null hypothesis is rejected, in favor of the alternative hypothesis that the iteration(full) model is needed to explain the variation.
+
+```{r summary PR}
+summary(p1.fit)
+```
+Deviance residual does not provide evidence of overfitting.
+
+
+#### 4.1.2 Goodness-of-fit
+
+```{r pchisq PR}
+with(p1.fit, cbind(res.deviance = deviance, df = df.residual,
+  p = pchisq(deviance, df.residual, lower.tail=FALSE)))
+```
+
+The goodness-of-fit chi-squared test is statistically significant in a level of significance $\alpha = 0.05$. Therefore, it indicate that the data do not fit the model well. However, it will be carried out other tests to evaluate the performance of the model.
+
+
+```{r res_PR,include=TRUE, fig.width=6, fig.height=4}
+poisson_residual <- simulateResiduals(p1.fit)
+plot(poisson_residual)
+
+#Residual vs fitted (Predicted value)
+MP1.df <- fortify(p1.fit)
+MP1.df$stddeviance_resid <- rstandard(p1.fit,type='deviance')
+ggplot(data=MP1.df,aes(x=.fitted,y=stddeviance_resid)) + geom_point() + labs(y = "Pearson Residuals", x = "Fitted values")+ 
+  theme_bw()
+```
+
+- QQ plot residual: it shows strong evidence to suggest that the distribution of the simulated quantiles do not follow a uniform    distribution. 
+- Quantiles of the residuals plot (red lines): it shows a non-uniform pattern for the Q4 predicted values.
+- Residuals versus Fitted values plot shows some patterns, indicating the model is not a good fit to the data. The spread of the Pearson residuals is increasing for larger values of the fitted values. 
+
+
+Test of dispersion?
+```{r overdispersion,include=TRUE}
+Nmp <- p1.fit$df.residual
+phi_hat <- deviance(p1.fit)/Nmp
+phi_hat > 1 + 3*sqrt(2/Nmp)
+```
+
+Test: Poisson vs Quasipoisson
+```{r test dispersion Quasipoisson}
+disp_result <- dispersiontest(p1.fit,trafo=1)$p.value
+print(disp_result)
+```
+The p-value for the test of dispersion was significant ($z = 2.92, p= 0.001713$), so there is sufficient evidence against the null hypothesis of the variance is equal to the mean. 
+
+There is sufficient information to decide that the model does not fit well the data. The model provides overdispersion which we can model with the alternative Quasipoisson and Negative Binomial regression.
+
+
+### 4.2. Quasi poisson (QP)
+
+Quasipoisson allows to the dispersion's models to be greater than 1 (Poisson = 1)
+```{r QP, include=TRUE}
+#Fit GLM with Quasipoisson
+qp1.fit <- glm(data = data, formula = Injuries ~ offset(log(Hours)) + Safety + Experience + Safety*Experience, family = quasipoisson)
+summary(qp1.fit)
+```
+The estimated dispersion parameter is larger than 1 (16.66084), therefore, it shows overdispersion of the model.
+
+
+#### 4.2.1 Goodness-of-fit
+```{r residuals QP, include=TRUE,fig.width=8, fig.height=7}
+#Plot 
+par(mfrow = c(2,2))
+plot(qp1.fit)
+```
+
+- Residuals versus Fitted plot: There is some patterns in the residuals and the predicted values. 
+- QQ plot: it shows some departure from normality in the distribution of residuals.
+
+
+Test: Poisson vs Negative Binomial
+```{r test dispersion NB}
+disp_result <- dispersiontest(p1.fit,trafo=2)
+print(disp_result)
+```
+P-value provide strong evidence against ($z = 5.1909, p= 1.046524e-07$) the null hypothesis of that the variance is equal to the mean and in favor of the alternative hypothesis of a Negative Binomial Model.
+
+
+### 4.3 Negative Binomial (NB)
+
+Because the previous analysis showed that the model had overdispersion, it is considered to perform a similar model (full interaction), but it is also considered to perform other models. This will allows us to select the best model with overdispersion.
+```{r Negative Binomial, include=TRUE}
+#Fit GLM with Negative Binomial.
+nb1.fit <- glm.nb(data = data, formula = Injuries ~ offset(log(Hours)) + Safety + Experience + Safety*Experience, link = "log")
+nb2.fit <- glm.nb(data = data, formula = Injuries ~ offset(log(Hours)) + Safety + Experience, link = "log")
+nb3.fit <- glm.nb(data = data, formula = Injuries ~ offset(log(Hours)) + Safety, link = "log")
+nb4.fit <- glm.nb(data = data, formula = Injuries ~ offset(log(Hours)) + Experience, link = "log")
+```
+
+
+#### 4.3.1 Model selection
+```{r selection NB, include=TRUE}
+#Assess the fit of the models: log-likelihood, AIC, BIC for four models: MQP1, MQP2, MQP3, and MQP4.
+model.list <- list("MNB1" = nb1.fit, "MNB2" = nb2.fit, "MNB3" = nb3.fit, "MNB4" = nb4.fit)
+logLiks <- sapply(model.list,FUN = logLik)
+aics <- sapply(model.list,FUN = AIC)
+bics <- sapply(model.list,FUN = BIC)
+
+#Aggregate measures of fit into a single data-frame for plotting
+plot_data3 <- data.frame(model = c("MNB1","MNB2","MNB3","MNB4"), aic = aics, bic = bics, logL = logLiks)
+
+#Display table with measures:
+knitr::kable(plot_data3,row.names = FALSE, col.names = c("Model","AIC","BIC","log-Likelihood"))
+```
+Models MNB3 and MNB4 are the only models not nested. Therefore, they can be compared using AIC and BIC. 
+
+- It is select MNB4 because it obtained the lowest AIC and BIC value.
+- MNB4 is nested of the model MNB2, so Anova is used to compare this nested models.
+
+```{r anova NB1,include=TRUE}
+#H0: Additional parameter safety is not needed to explain variation
+#H1: Additional parameter safety is needed to explain variation
+anova(nb4.fit,nb2.fit,test="Chisq")
+```
+The p-value is significant, so the null hypothesis is rejected, in favor of the alternative hypothesis that the additional covariate safety is in needed to explain variation.
+
+- MNB2 is selected according to the Anova test.
+- MNB2 is nested of the model MNB1, so Anova is again used to compare them.
+
+- H0: Additional parameter iteration between safety and experience (safety*experience) is not needed to explain variation
+- H1: Additional parameter iteration between safety and experience (safety*experience) is needed to explain variation
+
+```{r anova NB2,include=TRUE}
+anova(nb2.fit,nb1.fit,test="Chisq")
+```
+The p-value is not significant, so we tentatively accept that the iteration Safety * Experience is not needed and proceed with MNB2.
+
+
+#### 4.3.2 Goodness-of-fit
+
+```{r pchisq NB}
+with(nb2.fit, cbind(res.deviance = deviance, df = df.residual,
+  p = pchisq(deviance, df.residual, lower.tail=FALSE)))
+```
+The goodness-of-fit chi-squared test is not statistically significant. So, it suggests the model fit well the data with 65 degrees of freedom.
+
+
+```{r res_NB, include=TRUE,fig.width=6, fig.height=4}
+#Simulate residuals from the chosen Negative Binomial model
+NB_residual <- simulateResiduals(nb2.fit)
+plot(NB_residual)
+
+#Residual vs fitted (Predicted value)
+NBP2.df <- fortify(nb2.fit)
+NBP2.df$stddeviance_resid <- rstandard(nb2.fit,type='deviance')
+ggplot(data=NBP2.df,aes(x=.fitted,y=stddeviance_resid)) + geom_point()
+```
+
+- The QQ plot residuals still shows some deviation from the uniform distribution according to Kolmogorov-Smirnov test. However, it looks lower deviation than the Poisson model.  
+- The Residual vs predicted does not show significant pattern in the residuals.
+
+
+## 5. Statistical significance
+
+```{r selected model}
+nb2.fit <- glm.nb(data = data, formula = Injuries ~ offset(log(Hours)) + Safety + Experience, link = "log")
+summary(nb2.fit)
+```
+
+Taking as reference (intercept coefficient) the group safety 1 and experience 1, it can be interpreted the following:
+
+  - Employee working in safety regimen 2 has relative risk of injury lower. It mean the group safety 2 decreases the effect of risk     of injuries. Also, in terms of significance, this safety regime may be deemed slightly significant because it has a p-value of      $p=0.0956$ comparing to a level of significance of $p=0.05$. 
+  
+  - In contrast, the level of significance for experience 2,3 and 4 is strong significance with p-values of $p=3.51e-05$,               $p=3.26e-13$ and $p=6.62e-38$, respectively.
+
+
+## 6. Interpretation
+
+Interpreting output:
+
+\[ln(Injuries) = -7.90435 + (-0.25880*Safety2) + (0.04599*Safety3) + (0.21189*Safety4) + 
+(-0.57208*Experience2) + (-1.02067*Experience3) + (-1.89899*Experience4)\]
+
+Intercept = log injuries rate for safety 1 and experience 1.
+
+To address the uncertainty, it is added the confidence intervals of 95%
+```{r intervals}
+nb2.fit_interv <- tidy(nb2.fit, conf.int = TRUE, conf.level = 0.95)
+nb2.fit_interv <- dplyr::select(nb2.fit_interv, term, conf.low, estimate, conf.high, std.error, statistic, p.value)
+```
+
+Expected values (reminder: it was used an offset)
+```{r estimates}
+nb2.coeff <- dplyr::select(nb2.fit_interv, conf.low, estimate, conf.high)
+
+#Exponential of log coefficient values
+nb2.coeff_exp <- exp(nb2.coeff)
+nb2.coeff_exp <- cbind(term=nb2.fit_interv$term, nb2.coeff_exp)
+nb2.coeff_exp
+```
+
+Intercept: safety 1 and experience 1 (references) and looking the expected values:
+ 
+  - Group safety 2 has 0.772 times the rate injury of safety 1 or decrease the risk of injury by 22.8%
+  - Group safety 3 has 1.047 times the rate injury of safety 1 or increase the risk of injury by 4.7%
+  - Group experience 2 has 0.564 times the rate injury of experience 1 or decrease the risk of injury by 43.6%
+  - Group experience 3 has 0.360 times the rate injury of experience 1 or decrease the risk of injury by 63.9%
+  - Group experience 4 has 0.149 times the rate injury of experience 1 or decrease the risk of injury by 85.0%
+
+This analysis provide a clear insight of that while more experience has the employee, there is a high likelihood of decreasing the number of injuries. However, if we compare the risk of decrease between experience 3 and 4, it can be seen a difference of 22% (85% - 63.9 = 21.1%). This amount is high if the difference of level is just 1. Similarly, between experience 2 and 3, the rate injury is 0.18 times (0.54 - 0.36 = 0.18). If information of age-experience was obtained, it could be interesting to determine the difference of age-experience between each experience level because it could appear other conditions which can affect the number of injuries, such as training and performance of the employees, some employees can have more training than others. Also,the safety 2 shows the best work in place in term of security. The first conclusion would be the safety practice in safety 2 are the most effective; however, other factor could be absence of employees in safety 3 or 4.
+
+
+## 7. Conclusion
+
+The Poisson GLM was a poor fit to the data (mean and variance). This led to the consideration of the negative binomial model. There were some supporting test. First, the AIC for the best Poisson regression was 1508.595 and for the best negative binomial model found 651.87 (substantially lower). Second,  The dispersion test provided strong evidence against (z = 5.1909, p= 1.046524e-07) the null hypothesis of that the variance is equal to the mean and in favor of the alternative hypothesis of a Negative Binomial (overdispersion) Model. Finally, it was found that the negative binomial model did not perfectly fit the data according to the analysis of residual. The negative binomial showed certain deviation from the uniform distribution, but the Poisson GLM fitted more deviation, suggesting a strong pattern in the residuals when plotted against the predicted values.
+
+The coefficient estimates of the negative binomial GLM fit indicate that the number of injuries is significantly lower for employees in the level group experience 4 (p-value: < 2e-16) compared to group experience level 1. Furthermore, level group experience 2 and 3 decrease significantly the number of injuries in comparison to experience 1 with, a p-value = 3.51e-05 and p-value = 3.26e-13, respectively. 
+
+There was slightly statistical significance (p-value = 0.0956) to indicate that the safety regime in place 2 affect decreasingly the response variable injuries by 22% compared to the intercept. 
+
+Finally, it is suggested to future analysis to determine the difference between experience groups and safety groups because the difference in certain groups are considerable. In the cases of safety groups, except the safety group 2, the remaining groups increase the number of injuries. This should be checked to determine the causes and also to take the best practice of group 2.
